@@ -1,0 +1,51 @@
+name: CI — Offline Tests & Deploy Script Checks
+
+on:
+  push:
+    branches: ["main", "master"]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  pytest-offline:
+    name: Offline Pytest Suite
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.14
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+          cache: "pip"
+          cache-dependency-path: |
+            requirements.lock
+            requirements-dev.txt
+
+      - name: Install locked dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.lock -r requirements-dev.txt
+
+      - name: Run offline pytest suite (zero GCP credentials)
+        env:
+          GOOGLE_APPLICATION_CREDENTIALS: ""
+          GOOGLE_CLOUD_PROJECT: ""
+          GCP_ORGANIZATION_ID: ""
+        run: pytest -q
+
+  shellcheck-scripts:
+    name: Shell Script Syntax & ShellCheck
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Validate bash syntax
+        run: bash -n scripts/*.sh
+
+      - name: Run ShellCheck on deploy scripts
+        run: shellcheck scripts/*.sh

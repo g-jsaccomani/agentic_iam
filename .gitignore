@@ -1,0 +1,38 @@
+# Python & Virtual Environment
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+
+# Environment & Local Secrets
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+*.p12
+*.pfx
+*credentials*.json
+*service-account*.json
+*service_account*.json
+
+# Generated Deliverables, Environment Collections & Session Exports
+exports/
+.agentic_iam_workspaces/
+posture_acceleration_book*.json
+*_inventory.json
+iam_posture_findings*.jsonl
+Agentic_IAM_Posture_Acceleration_Report.*
+attack_path_graph*.png
+agentic_iam_terraform_remediation_bundle*.zip
+*.tfstate
+*.tfstate.*
+*.tfvars
+*.tfvars.json
+
+# macOS / OS
+.DS_Store

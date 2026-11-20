@@ -1,0 +1,28 @@
+# Google Agent Development Kit (ADK) & Vertex AI Gemini 3.1 Pro
+google-adk==2.14.1
+google-genai==2.34.0
+
+# Google Cloud IAM, Asset Inventory, Recommender & BigQuery SDKs
+google-cloud-asset==4.5.0
+google-cloud-bigquery==3.47.0
+google-cloud-recommender==2.23.0
+google-cloud-resource-manager==1.19.0
+google-cloud-logging==3.17.0
+google-api-python-client==2.202.0
+google-auth==2.62.2
+
+# Backend Web Service, Graph Engine & Deliverables
+fastapi==0.162.0
+starlette==1.10.0
+uvicorn[standard]==0.54.0
+pydantic==2.14.3
+pydantic-settings==2.16.2
+python-dotenv==1.2.4
+networkx==3.7
+matplotlib==3.11.2
+streamlit==1.67.0
+plotly==7.1.0
+python-docx==1.2.0
+reportlab==5.1.0
+httpx==0.28.1
+cryptography==50.0.2

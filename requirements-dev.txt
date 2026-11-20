@@ -1,0 +1,6 @@
+# Offline testing & development dependencies for Agentic IAM Accelerator
+pytest==9.2.0
+pytest-asyncio==1.4.1.post1
+iniconfig==2.3.1
+pluggy==1.6.0
+Pygments==2.21.0
