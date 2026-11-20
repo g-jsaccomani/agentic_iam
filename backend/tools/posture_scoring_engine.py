@@ -661,18 +661,26 @@ def compute_iam_framework_baseline(scope: str = "", force_refresh: bool = False)
     for s in all_sas_raw:
         if s.get("is_google_managed_service_agent"):
             continue
+        k_st = str(s.get("key_inspection_status") or "UNKNOWN")
+        if k_st == "EXTERNAL_OUT_OF_SCOPE":
+            # External SAs are governed and counted in Domain 2 (EXTERNAL_IDENTITIES); avoid double-counting
+            continue
         em = str(s.get("email") or "").strip().lower()
         if em:
             sa_records[em] = {
                 "email": em,
                 "is_default": bool(s.get("is_default_service_account")),
-                "key_status": str(s.get("key_inspection_status") or "UNKNOWN"),
+                "key_status": k_st,
                 "user_keys": int(s.get("user_managed_keys_count") or 0),
                 "oldest_key_days": int(s.get("oldest_user_managed_key_age_days") or 0),
                 "roles": set(s.get("granted_roles") or []),
             }
     for b in cust_bindings:
-        if b.get("principal_type") == "service_account" and not b.get("is_google_service_agent"):
+        if (
+            b.get("principal_type") == "service_account"
+            and not b.get("is_google_service_agent")
+            and not b.get("is_external")
+        ):
             em = b["principal"].split(":", 1)[-1].strip().lower()
             rec = sa_records.setdefault(
                 em,
@@ -688,7 +696,7 @@ def compute_iam_framework_baseline(scope: str = "", force_refresh: bool = False)
             rec["roles"].add(b["role"])
 
     total_sas = len(sa_records)
-    verified_key_sas = [r for r in sa_records.values() if r["key_status"] != "UNKNOWN"]
+    verified_key_sas = [r for r in sa_records.values() if r["key_status"] in ("LIVE_IAM_API_VERIFIED", "CAI_ONLY")]
     unknown_key_sas = [r for r in sa_records.values() if r["key_status"] == "UNKNOWN"]
     sas_keys_over_90d = sum(1 for r in sa_records.values() if r["oldest_key_days"] > 90)
     total_user_managed_keys = int(sa_inv.get("total_user_managed_keys") or sum(r["user_keys"] for r in sa_records.values()))
@@ -706,11 +714,17 @@ def compute_iam_framework_baseline(scope: str = "", force_refresh: bool = False)
             c_wkl_01_num, c_wkl_01_den, c_wkl_01_ne = 1.0, 1.0, False
             c_wkl_01_ev = "0 items in scope (complete coverage verified): no customer or default Service Accounts found."
     elif not verified_key_sas:
-        c_wkl_01_num, c_wkl_01_den, c_wkl_01_ne = 0.0, 0.0, True
-        c_wkl_01_ev = (
-            f"Not evaluated: key inspection status UNKNOWN for all {total_sas} Service Accounts "
-            f"(IAM key API queries failed or capped)."
-        )
+        if not unknown_key_sas:
+            c_wkl_01_num, c_wkl_01_den, c_wkl_01_ne = 1.0, 1.0, False
+            c_wkl_01_ev = (
+                f"0 key-capable customer SAs in scope ({total_sas} Google-hosted/orphaned SA record(s) cannot hold user-managed keys)."
+            )
+        else:
+            c_wkl_01_num, c_wkl_01_den, c_wkl_01_ne = 0.0, 0.0, True
+            c_wkl_01_ev = (
+                f"Not evaluated: key inspection status UNKNOWN for all {len(unknown_key_sas)} key-capable Service Accounts "
+                f"(IAM key API queries failed or capped)."
+            )
     else:
         c_wkl_01_ne = False
         key_credits = 0.0
@@ -862,7 +876,7 @@ def compute_iam_framework_baseline(scope: str = "", force_refresh: bool = False)
     compliant_workload_count = sum(
         1
         for r in sa_records.values()
-        if r["key_status"] != "UNKNOWN"
+        if r["key_status"] in ("LIVE_IAM_API_VERIFIED", "CAI_ONLY", "NOT_APPLICABLE_GOOGLE_HOSTED")
         and r["user_keys"] == 0
         and not (r["is_default"] and len(r["roles"]) > 0)
         and not (r["roles"] & PRIMITIVE_ROLES)

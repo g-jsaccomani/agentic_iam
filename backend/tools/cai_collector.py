@@ -90,9 +90,10 @@ class CollectionStatus:
             return None
         if self.evaluated_count is not None and self.total_candidates is not None and self.evaluated_count < self.total_candidates:
             reason = f" ({self.cutoff_reason})" if self.cutoff_reason else ""
+            err_snip = f" — {self.error}" if self.error else ""
             return (
                 f"{self.collector} [{self.scope}]: evaluated {self.evaluated_count} of "
-                f"{self.total_candidates} items{reason}."
+                f"{self.total_candidates} items{reason}{err_snip}."
             )
         if self.cutoff_reason == "HTTP_ERROR" or self.http_status >= 400:
             err_snip = f" — {self.error}" if self.error else ""
@@ -276,11 +277,34 @@ KEY_IAM_ORG_CONSTRAINTS: Tuple[str, ...] = (
 GOOGLE_SERVICE_AGENT_PATTERNS: Tuple[str, ...] = (
     "@gcp-sa-",
     "@cloudservices.gserviceaccount.com",
+    ".system.gserviceaccount.com",
+    ".google.com.iam.gserviceaccount.com",
     "@serverless-robot-prod.iam.gserviceaccount.com",
     "@container-engine-robot.iam.gserviceaccount.com",
     "@containerregistry.iam.gserviceaccount.com",
     "@container-analysis.iam.gserviceaccount.com",
     "@compute-system.iam.gserviceaccount.com",
+    "@gs-project-accounts.iam.gserviceaccount.com",
+    "@gcf-admin-robot.iam.gserviceaccount.com",
+    "@gcp-gae-service.iam.gserviceaccount.com",
+    "@dataflow-service-producer-prod.iam.gserviceaccount.com",
+    "@dataproc-accounts.iam.gserviceaccount.com",
+    "@cloudcomposer-accounts.iam.gserviceaccount.com",
+    "@dlp-api.iam.gserviceaccount.com",
+    "@bigquery-encryption.iam.gserviceaccount.com",
+    "@sourcerepo-service-accounts.iam.gserviceaccount.com",
+    "@cloud-filer.iam.gserviceaccount.com",
+    "@cloud-tpu.iam.gserviceaccount.com",
+    "@remotebuildexecution.iam.gserviceaccount.com",
+    "@endpoints-portal.iam.gserviceaccount.com",
+    "@trapezoid-prod.iam.gserviceaccount.com",
+    "@cloud-cdn-fill.iam.gserviceaccount.com",
+    "@partnercontent.gserviceaccount.com",
+    "@firebase-sa-management.iam.gserviceaccount.com",
+    "@gke-node-system.iam.gserviceaccount.com",
+    "@cloud-memcache-sa.iam.gserviceaccount.com",
+    "@cloud-redis.iam.gserviceaccount.com",
+    "@cloud-spanner-backup.iam.gserviceaccount.com",
 )
 
 
@@ -1661,8 +1685,33 @@ def collect_unified_service_account_keys(
     now_utc = datetime.datetime.now(datetime.timezone.utc)
     sa_assets = [r for r in resources if r.get("asset_type") == "iam.googleapis.com/ServiceAccount"]
 
+    def _resolve_sa_key_project(email: str, raw_proj: str = "") -> str:
+        """Resolves a valid GCP project ID or number for IAM v1 SA key queries (never org/folder paths)."""
+        owner = extract_sa_owning_project(email)
+        cand = (raw_proj or "").strip()
+        if cand.startswith("projects/"):
+            cand = cand.split("/", 1)[1].strip()
+        if (
+            not cand
+            or "/" in cand
+            or cand in ("-", "organization", "external-or-org", "unknown-project")
+            or cand.startswith(("organizations", "folders"))
+        ):
+            cand = ""
+        if owner:
+            # For numeric Compute default SAs, prefer the human-readable project ID when available from CAI
+            if owner.isdigit() and cand and not cand.isdigit():
+                return cand
+            return owner
+        return cand or "-"
+
+    def _is_google_hosted_keyless_default_sa(email: str) -> bool:
+        """Legacy Cloud Build SAs are hosted in Google's project and cannot have customer-managed JSON keys."""
+        return email.strip().lower().endswith("@cloudbuild.gserviceaccount.com")
+
     # Build deduplicated candidate SA map from CAI assets + IAM bindings
     candidates: List[Dict[str, Any]] = []
+    non_inspectable_by_sa: Dict[str, Dict[str, Any]] = {}
     seen_emails: Set[str] = set()
     for sa in sa_assets:
         attrs = sa.get("additional_attributes") or {}
@@ -1671,11 +1720,23 @@ def collect_unified_service_account_keys(
         if not email or email in seen_emails or is_google_managed_service_agent(f"serviceAccount:{email}"):
             continue
         seen_emails.add(email)
-        sa_proj = sa.get("project_id") or ""
-        if not sa_proj or sa_proj == "unknown-project":
-            m_sa = re.search(r"@([a-z][a-z0-9-]{4,29})\.iam\.gserviceaccount\.com$", email)
-            sa_proj = m_sa.group(1) if m_sa else "-"
-        candidates.append({"sa": sa, "email": email, "proj_id": sa_proj})
+        sa_proj = _resolve_sa_key_project(email, str(sa.get("project_id") or sa.get("project") or ""))
+        if _is_google_hosted_keyless_default_sa(email):
+            non_inspectable_by_sa[email] = {
+                "email": email,
+                "project_id": sa_proj,
+                "sa": sa,
+                "key_inspection_status": "NOT_APPLICABLE_GOOGLE_HOSTED",
+                "key_inspection_error": None,
+                "user_managed_keys": [],
+                "system_managed_keys": [],
+                "unknown_keys": [],
+                "user_managed_keys_count": 0,
+                "system_managed_keys_count": 0,
+                "oldest_user_managed_key_age_days": 0,
+            }
+            continue
+        candidates.append({"sa": sa, "email": email, "proj_id": sa_proj, "from_cai_asset": True})
 
     for b in bindings:
         if b.get("principal_type") == "service_account" and not b.get("is_google_service_agent"):
@@ -1683,13 +1744,49 @@ def collect_unified_service_account_keys(
             if not email or email in seen_emails or is_google_managed_service_agent(f"serviceAccount:{email}"):
                 continue
             seen_emails.add(email)
-            m_sa = re.search(r"@([a-z][a-z0-9-]{4,29})\.iam\.gserviceaccount\.com$", email)
-            sa_proj = m_sa.group(1) if m_sa else (b.get("project_id") or "-")
+            sa_proj = _resolve_sa_key_project(email, str(b.get("project_id") or ""))
+            sa_stub = {
+                "name": f"//iam.googleapis.com/projects/{sa_proj}/serviceAccounts/{email}",
+                "display_name": email,
+                "project_id": sa_proj,
+            }
+            if _is_google_hosted_keyless_default_sa(email):
+                non_inspectable_by_sa[email] = {
+                    "email": email,
+                    "project_id": sa_proj,
+                    "sa": sa_stub,
+                    "key_inspection_status": "NOT_APPLICABLE_GOOGLE_HOSTED",
+                    "key_inspection_error": None,
+                    "user_managed_keys": [],
+                    "system_managed_keys": [],
+                    "unknown_keys": [],
+                    "user_managed_keys_count": 0,
+                    "system_managed_keys_count": 0,
+                    "oldest_user_managed_key_age_days": 0,
+                }
+                continue
+            if b.get("is_external") is True:
+                # External SAs live in foreign GCP projects where the org auditor cannot query IAM keys
+                non_inspectable_by_sa[email] = {
+                    "email": email,
+                    "project_id": sa_proj,
+                    "sa": sa_stub,
+                    "key_inspection_status": "EXTERNAL_OUT_OF_SCOPE",
+                    "key_inspection_error": None,
+                    "user_managed_keys": [],
+                    "system_managed_keys": [],
+                    "unknown_keys": [],
+                    "user_managed_keys_count": 0,
+                    "system_managed_keys_count": 0,
+                    "oldest_user_managed_key_age_days": 0,
+                }
+                continue
             candidates.append(
                 {
-                    "sa": {"name": f"//iam.googleapis.com/projects/{sa_proj}/serviceAccounts/{email}", "display_name": email, "project_id": sa_proj},
+                    "sa": sa_stub,
                     "email": email,
                     "proj_id": sa_proj,
+                    "from_cai_asset": False,
                 }
             )
 
@@ -1738,10 +1835,26 @@ def collect_unified_service_account_keys(
     to_inspect = candidates[:max_sa_checks]
     capped_candidates = candidates[max_sa_checks:]
 
+    def _extract_iam_error_reason(code: int, payload: Any) -> str:
+        if isinstance(payload, dict):
+            err = payload.get("error")
+            if isinstance(err, dict):
+                status_txt = str(err.get("status") or "").strip()
+                msg_txt = str(err.get("message") or "").strip()
+                if status_txt and msg_txt:
+                    return f"HTTP_{code} ({status_txt}: {msg_txt[:100]})"
+                if status_txt:
+                    return f"HTTP_{code} ({status_txt})"
+                if msg_txt:
+                    return f"HTTP_{code} ({msg_txt[:100]})"
+        return f"HTTP_{code}"
+
     def _query_one_sa(item: Dict[str, Any]) -> Dict[str, Any]:
         email = item["email"]
         proj_id = item["proj_id"]
-        if not proj_id or proj_id in ("-", "organization", "external-or-org", "unknown-project"):
+        from_cai_asset = bool(item.get("from_cai_asset"))
+        effective_proj = proj_id if (proj_id and proj_id not in ("-", "organization", "external-or-org", "unknown-project")) else "-"
+        if effective_proj == "-" and not email:
             return {
                 "email": email,
                 "proj_id": proj_id,
@@ -1751,11 +1864,17 @@ def collect_unified_service_account_keys(
                 "error": "UNRESOLVABLE_PROJECT",
                 "keys": [],
             }
-        q_proj = quote_path_segment(proj_id)
+        q_proj = quote_path_segment(effective_proj)
         q_email = quote_path_segment(email)
         keys_url = f"https://iam.googleapis.com/v1/projects/{q_proj}/serviceAccounts/{q_email}/keys"
         try:
             k_code, k_data = gcp_rest_request("GET", keys_url, params={"keyTypes": "USER_MANAGED"}, timeout=10.0)
+            # Retry once with the IAM v1 wildcard project (`projects/-`) if a specific project path returned 404
+            if k_code == 404 and effective_proj != "-":
+                wildcard_url = f"https://iam.googleapis.com/v1/projects/-/serviceAccounts/{q_email}/keys"
+                w_code, w_data = gcp_rest_request("GET", wildcard_url, params={"keyTypes": "USER_MANAGED"}, timeout=10.0)
+                if w_code == 200:
+                    k_code, k_data = w_code, w_data
             if k_code == 200 and isinstance(k_data, dict):
                 found: List[Dict[str, Any]] = []
                 for k in k_data.get("keys", []):
@@ -1788,13 +1907,25 @@ def collect_unified_service_account_keys(
                     "error": None,
                     "keys": found,
                 }
+            # Binding-only SAs that do not exist in CAI ServiceAccount assets and return 404 are orphaned/deleted
+            # or Google-hosted SAs without customer IAM key resources (not a broken org telemetry collector).
+            if k_code == 404 and not from_cai_asset:
+                return {
+                    "email": email,
+                    "proj_id": proj_id,
+                    "sa": item["sa"],
+                    "status": "NOT_FOUND_OR_ORPHANED",
+                    "http_status": 404,
+                    "error": "HTTP_404_NOT_IN_ORG",
+                    "keys": [],
+                }
             return {
                 "email": email,
                 "proj_id": proj_id,
                 "sa": item["sa"],
                 "status": "UNKNOWN",
                 "http_status": k_code,
-                "error": f"HTTP_{k_code}",
+                "error": _extract_iam_error_reason(k_code, k_data),
                 "keys": [],
             }
         except Exception as exc:
@@ -1810,15 +1941,16 @@ def collect_unified_service_account_keys(
 
     inspected_results = run_pool_map_with_context(_query_one_sa, to_inspect, max_workers=10) if to_inspect else []
 
-    by_sa: Dict[str, Dict[str, Any]] = {}
+    by_sa: Dict[str, Dict[str, Any]] = dict(non_inspectable_by_sa)
     failed_sa_count = 0
     first_err_code = 200
     first_err_msg: Optional[str] = None
+    _NON_ERROR_INSPECTION_STATUSES = ("LIVE_IAM_API_VERIFIED", "NOT_FOUND_OR_ORPHANED", "EXTERNAL_OUT_OF_SCOPE")
 
     for res in inspected_results:
         em = res["email"]
         st = res["status"]
-        if st != "LIVE_IAM_API_VERIFIED":
+        if st not in _NON_ERROR_INSPECTION_STATUSES:
             failed_sa_count += 1
             if first_err_code == 200:
                 first_err_code = int(res["http_status"] or 500)
@@ -1885,7 +2017,7 @@ def collect_unified_service_account_keys(
         else:
             srec["unknown_keys"].append(kr)
 
-    verified_count = sum(1 for r in by_sa.values() if r["key_inspection_status"] == "LIVE_IAM_API_VERIFIED")
+    evaluated_ok_count = max(0, len(to_inspect) - failed_sa_count)
     if capped_candidates:
         sa_cov_status = CollectionStatus(
             collector="sa_keys",
@@ -1896,7 +2028,7 @@ def collect_unified_service_account_keys(
             http_status=first_err_code if failed_sa_count else 200,
             error=first_err_msg,
             cutoff_reason="CAP_EVALUATED",
-            evaluated_count=len(to_inspect) - failed_sa_count,
+            evaluated_count=evaluated_ok_count,
             total_candidates=total_candidates,
         )
     elif failed_sa_count > 0:
@@ -1909,7 +2041,7 @@ def collect_unified_service_account_keys(
             http_status=first_err_code,
             error=f"{failed_sa_count} of {total_candidates} SA key lookups failed ({first_err_msg})",
             cutoff_reason="HTTP_ERROR",
-            evaluated_count=verified_count,
+            evaluated_count=evaluated_ok_count,
             total_candidates=total_candidates,
         )
     else:

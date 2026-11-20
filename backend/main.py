@@ -1697,13 +1697,14 @@ async def start_background_scan(req: BackgroundScanRequest, request: Request) ->
 
     async def _run_job() -> None:
         try:
-            out_dir = scoped_export_dir(target_scope)
-            book = await run_posture_book_assessment(
-                scope=target_scope,
-                model_name=resolved_model,
-                force_refresh=bool(req.refresh),
-            )
-            await asyncio.to_thread(_persist_book_and_base_artifacts, book, out_dir)
+            with bind_inspection_session_context(sess):
+                out_dir = scoped_export_dir(target_scope)
+                book = await run_posture_book_assessment(
+                    scope=target_scope,
+                    model_name=resolved_model,
+                    force_refresh=bool(req.refresh),
+                )
+                await asyncio.to_thread(_persist_book_and_base_artifacts, book, out_dir)
             record["status"] = "completed"
             record["http_status"] = 200
             record["book"] = _strip_server_paths(book.model_dump())
@@ -2292,10 +2293,149 @@ async def serve_executive_dashboard(request: Request) -> HTMLResponse:
       padding: 1.1rem 1.25rem;
       transition: transform 0.15s ease, border-color 0.15s ease;
     }
-    .stat-card:hover { border-color: var(--primary); transform: translateY(-2px); }
+    .stat-card:hover, .stat-card:focus-visible { border-color: var(--primary); transform: translateY(-2px); outline: none; }
+    .stat-title-row { display: flex; align-items: center; justify-content: space-between; gap: 6px; }
     .stat-title { font-size: 0.72rem; color: var(--text-muted); font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; }
+    .kpi-info-cue {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      font-size: 0.66rem;
+      font-weight: 600;
+      color: #8AB4F8;
+      background: rgba(138, 180, 248, 0.1);
+      border: 1px solid rgba(138, 180, 248, 0.24);
+      border-radius: 999px;
+      padding: 1px 7px;
+      letter-spacing: 0.2px;
+      opacity: 0.82;
+      transition: opacity 0.15s ease, background 0.15s ease, border-color 0.15s ease;
+      white-space: nowrap;
+    }
+    .stat-card:hover .kpi-info-cue,
+    .stat-card:focus-visible .kpi-info-cue {
+      opacity: 1;
+      background: rgba(138, 180, 248, 0.2);
+      border-color: rgba(138, 180, 248, 0.5);
+    }
     .stat-value { font-size: 1.75rem; font-weight: 800; margin-top: 0.25rem; letter-spacing: -0.02em; }
     .stat-desc { font-size: 0.78rem; color: var(--text-subtle); margin-top: 0.2rem; }
+
+    /* Floating Accessible KPI Calculation Rationale Popover */
+    .kpi-rationale-popover {
+      position: fixed;
+      top: 0;
+      left: 0;
+      z-index: 1200;
+      width: 420px;
+      max-width: calc(100vw - 24px);
+      max-height: min(76vh, 540px);
+      overflow-y: auto;
+      background: #141923;
+      border: 1px solid rgba(138, 180, 248, 0.42);
+      border-radius: 10px;
+      padding: 14px 16px;
+      box-shadow: 0 20px 48px rgba(0, 0, 0, 0.78);
+      color: var(--text-main);
+      font-size: 0.76rem;
+      line-height: 1.5;
+      opacity: 0;
+      visibility: hidden;
+      pointer-events: none;
+      transform: translateY(4px);
+      transition: opacity 0.14s ease, transform 0.14s ease, visibility 0.14s ease;
+    }
+    .kpi-rationale-popover.visible {
+      opacity: 1;
+      visibility: visible;
+      pointer-events: auto;
+      transform: translateY(0);
+    }
+    .kpi-pop-hdr {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+      padding-bottom: 8px;
+      margin-bottom: 9px;
+    }
+    .kpi-pop-title {
+      font-size: 0.8rem;
+      font-weight: 700;
+      color: #FFFFFF;
+      letter-spacing: 0.2px;
+    }
+    .kpi-pop-badge {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 0.75rem;
+      font-weight: 700;
+      padding: 2px 8px;
+      border-radius: 999px;
+      background: rgba(138, 180, 248, 0.14);
+      border: 1px solid rgba(138, 180, 248, 0.3);
+      color: #8AB4F8;
+      white-space: nowrap;
+    }
+    .kpi-pop-label {
+      font-size: 0.67rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      color: #8AB4F8;
+      margin: 8px 0 4px;
+    }
+    .kpi-pop-formula {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 0.71rem;
+      color: #E2E8F0;
+      background: rgba(11, 14, 20, 0.85);
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      border-radius: 6px;
+      padding: 6px 9px;
+      word-break: break-word;
+    }
+    .kpi-pop-rows {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      margin-top: 4px;
+    }
+    .kpi-pop-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: baseline;
+      gap: 10px;
+      padding: 3px 0;
+      border-bottom: 1px dashed rgba(255, 255, 255, 0.06);
+    }
+    .kpi-pop-row:last-child { border-bottom: none; }
+    .kpi-pop-row-k { color: var(--text-muted); flex: 1; min-width: 0; }
+    .kpi-pop-row-v {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 0.72rem;
+      color: var(--text-main);
+      font-weight: 600;
+      text-align: right;
+      white-space: nowrap;
+    }
+    .kpi-pop-note {
+      margin-top: 9px;
+      padding: 7px 9px;
+      border-radius: 6px;
+      background: rgba(138, 180, 248, 0.08);
+      border-left: 2px solid #8AB4F8;
+      color: var(--text-muted);
+      font-size: 0.72rem;
+      line-height: 1.45;
+    }
+    .kpi-pop-list {
+      margin: 4px 0 0 1rem;
+      padding: 0;
+      color: var(--text-muted);
+      font-size: 0.72rem;
+    }
+    .kpi-pop-list li { margin-top: 3px; }
 
     /* Cards & Charts */
     .card {
@@ -2663,7 +2803,7 @@ async def serve_executive_dashboard(request: Request) -> HTMLResponse:
 
     @media print {
       body { background: #FFFFFF !important; color: #202124 !important; font-size: 9.5pt !important; }
-      .header, .nav-bar, .filter-submenu-bar, .footer, .drawer-overlay, .drawer-panel, .auth-overlay, .no-print { display: none !important; }
+      .header, .nav-bar, .filter-submenu-bar, .footer, .drawer-overlay, .drawer-panel, .auth-overlay, .kpi-rationale-popover, .no-print { display: none !important; }
       .container { max-width: 100% !important; padding: 0 !important; }
       .tab-panel { display: none !important; }
       #tab-report { display: block !important; }
@@ -3030,23 +3170,35 @@ async def serve_executive_dashboard(request: Request) -> HTMLResponse:
     <div id="tab-dashboard" class="tab-panel">
       <div id="coverageWarningsBanner" style="display:none; background:rgba(245,159,0,0.12); border:1px solid #F59F00; border-radius:8px; padding:0.85rem 1.05rem; margin-bottom:1rem; font-size:0.82rem; color:#FFE066; line-height:1.5;"></div>
       <div class="grid-stats">
-        <div class="stat-card" onclick="showTab('triad')" style="cursor:pointer;">
-          <div class="stat-title">Overall Posture Health</div>
+        <div class="stat-card" data-kpi-rationale="overall" tabindex="0" aria-describedby="kpiRationalePopover" onclick="showTab('triad')" style="cursor:pointer;">
+          <div class="stat-title-row">
+            <div class="stat-title">Overall Posture Health</div>
+            <span class="kpi-info-cue" aria-hidden="true">&#9432; Formula</span>
+          </div>
           <div class="stat-value" id="kpiOverallScore" style="color:var(--warning);">--%</div>
           <div class="stat-desc" id="kpiMaturityTier">Connect an Organization to begin</div>
         </div>
-        <div class="stat-card" onclick="showTab('triad')" style="cursor:pointer;">
-          <div class="stat-title">Compliant Principals</div>
+        <div class="stat-card" data-kpi-rationale="compliant" tabindex="0" aria-describedby="kpiRationalePopover" onclick="showTab('triad')" style="cursor:pointer;">
+          <div class="stat-title-row">
+            <div class="stat-title">Compliant Principals</div>
+            <span class="kpi-info-cue" aria-hidden="true">&#9432; Formula</span>
+          </div>
           <div class="stat-value" id="kpiCompliantCount" style="color:var(--success);">--</div>
           <div class="stat-desc" id="kpiCompliantSub">Across Internal, External &amp; SAs</div>
         </div>
-        <div class="stat-card" onclick="showTab('iac')" style="cursor:pointer;">
-          <div class="stat-title">Least-Privilege Index</div>
+        <div class="stat-card" data-kpi-rationale="lpi" tabindex="0" aria-describedby="kpiRationalePopover" onclick="showTab('iac')" style="cursor:pointer;">
+          <div class="stat-title-row">
+            <div class="stat-title">Least-Privilege Index</div>
+            <span class="kpi-info-cue" aria-hidden="true">&#9432; Formula</span>
+          </div>
           <div class="stat-value" id="kpiExcessPerms" style="color:#8AB4F8;">--%</div>
           <div class="stat-desc" id="kpiExcessSub">Excess permissions analysis</div>
         </div>
-        <div class="stat-card" onclick="showTab('triad')" style="cursor:pointer;">
-          <div class="stat-title">Critical &amp; High Gaps</div>
+        <div class="stat-card" data-kpi-rationale="crithigh" tabindex="0" aria-describedby="kpiRationalePopover" onclick="showTab('triad')" style="cursor:pointer;">
+          <div class="stat-title-row">
+            <div class="stat-title">Critical &amp; High Gaps</div>
+            <span class="kpi-info-cue" aria-hidden="true">&#9432; Formula</span>
+          </div>
           <div class="stat-value" id="kpiCritHighCount" style="color:var(--danger);">--</div>
           <div class="stat-desc" id="kpiCritHighSub">Immediate modernization priority</div>
         </div>
@@ -3584,6 +3736,9 @@ async def serve_executive_dashboard(request: Request) -> HTMLResponse:
   <footer class="footer">
     Agentic IAM Accelerator v2.2 | Google Cloud Security Consulting | Zero-Trust Per-User Encrypted Persistence | Google ADK &amp; Vertex AI (global)
   </footer>
+
+  <!-- Floating Accessible KPI Calculation Rationale Popover -->
+  <div id="kpiRationalePopover" class="kpi-rationale-popover" role="tooltip" aria-hidden="true"></div>
 
   <script>
     let latestBook = null;
@@ -5114,13 +5269,24 @@ async def serve_executive_dashboard(request: Request) -> HTMLResponse:
       statusBadge.innerText = forceRefresh ? `Evaluating ${scope}...` : `Restoring pinned ${scope}...`;
 
       try {
+        async function _safeParseJson(res) {
+          const text = await res.text();
+          if (!text) return {};
+          try {
+            return JSON.parse(text);
+          } catch (_) {
+            return { detail: `HTTP ${res.status}: ${text.slice(0, 180)}` };
+          }
+        }
+
         async function _runBackgroundScanViaPost(doRefresh) {
+          const startedAtMs = Date.now();
           const startRes = await fetch('/api/v1/scans', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
             body: JSON.stringify({ scope, model, refresh: !!doRefresh })
           });
-          const startData = await startRes.json();
+          const startData = await _safeParseJson(startRes);
           if (!startRes.ok) {
             if (handleServerSessionMissing(startRes.status, startData.detail)) return null;
             throw new Error(startData.detail || `HTTP ${startRes.status}`);
@@ -5128,8 +5294,10 @@ async def serve_executive_dashboard(request: Request) -> HTMLResponse:
           const scanId = startData.scan_id;
           while (true) {
             await new Promise(r => setTimeout(r, 1500));
+            const elapsedSec = Math.max(1, Math.round((Date.now() - startedAtMs) / 1000));
+            statusBadge.innerText = `Evaluating ${scope}... (${elapsedSec}s)`;
             const pollRes = await fetch(`/api/v1/scans/${encodeURIComponent(scanId)}`);
-            const pollData = await pollRes.json();
+            const pollData = await _safeParseJson(pollRes);
             if (!pollRes.ok) {
               if (handleServerSessionMissing(pollRes.status, pollData.detail)) return null;
               throw new Error(pollData.detail || `HTTP ${pollRes.status}`);
@@ -5437,7 +5605,7 @@ async def serve_executive_dashboard(request: Request) -> HTMLResponse:
       el.innerHTML = `
         <div class="chapter-h2" style="margin-top:1.5rem;">2. Posture Scorecard &amp; 5 Security Framework Benchmarks (${sc.overall_posture_score}% — ${escHtml(sc.maturity_tier)})</div>
         <div class="table-container"><table>
-          <thead><tr><th>Security Framework Benchmark</th><th>Alignment %</th><th>Controls &ge;80%</th><th>Primary Focus</th></tr></thead>
+          <thead><tr><th>Security Framework Benchmark</th><th>Alignment %</th><th>Controls &ge;85%</th><th>Primary Focus</th></tr></thead>
           <tbody>${bmHtml}</tbody>
         </table></div>
         ${vaultHtml}
@@ -5459,6 +5627,274 @@ async def serve_executive_dashboard(request: Request) -> HTMLResponse:
         </table></div>
         <p style="margin-top:1rem; font-size:0.8rem; color:var(--text-muted);">Download the <strong>Full Word (.docx)</strong> or <strong>Full PDF (.pdf)</strong> above for all 7 complete sections, including every individual Account, Service Account, SA Key, Secret Manager entry, KMS CryptoKey, API Key, Custom Role, WIF Pool, Choke-Point Centrality table, and all 5 advisory Terraform HCL modules.</p>
       `;
+    }
+
+    // =========================================================================
+    // ACCESSIBLE KPI CALCULATION RATIONALE POPOVER (HOVER + KEYBOARD FOCUS)
+    // =========================================================================
+    let _kpiHideTimer = null;
+    let _activeKpiAnchor = null;
+
+    function _kpiRow(label, value, valueColor) {
+      const style = valueColor ? ` style="color:${valueColor};"` : '';
+      return `<div class="kpi-pop-row"><span class="kpi-pop-row-k">${escHtml(label)}</span><span class="kpi-pop-row-v"${style}>${escHtml(value)}</span></div>`;
+    }
+
+    function buildKpiRationaleHtml(kpiKey, book) {
+      const sc = book && book.scorecard ? book.scorecard : null;
+      const tm = book && book.triad_matrix ? book.triad_matrix : null;
+      const recs = (book && Array.isArray(book.recommendations)) ? book.recommendations : [];
+      const notEval = new Set((sc && sc.not_evaluated_domains) || []);
+
+      if (kpiKey === 'overall') {
+        if (!sc) {
+          return `<div class="kpi-pop-hdr"><span class="kpi-pop-title">Overall Posture Health</span><span class="kpi-pop-badge">Formula</span></div>
+            <div class="kpi-pop-label">Methodology</div>
+            <div class="kpi-pop-formula">Final = clamp(22% Internal + 18% External + 22% Workload + 20% Least-Privilege + 18% Resilience + ADK_Delta[-5,+5] + Cap_Effect, 0, 100)</div>
+            <div class="kpi-pop-note">Connect a GCP Organization and run an ADK scan to see live weighted contributions per pillar, bounded ADK calibration, and ceiling gate checks.</div>`;
+        }
+        const pillars = [
+          { key: 'INTERNAL_IDENTITIES', name: '1. Internal Workforce & Group RBAC', baseW: 22, score: Number(sc.internal_identities_score || 0) },
+          { key: 'EXTERNAL_IDENTITIES', name: '2. External Identities & DRS', baseW: 18, score: Number(sc.external_identities_score || 0) },
+          { key: 'WORKLOAD_IDENTITIES', name: '3. Workload & SA Hygiene (WIF)', baseW: 22, score: Number(sc.workload_identities_score || 0) },
+          { key: 'LEAST_PRIVILEGE', name: '4. Least-Privilege Index', baseW: 20, score: Number(sc.least_privilege_index || 0) },
+          { key: 'GRAPH_RESILIENCE', name: '5. Impersonation & Escalation Resilience', baseW: 18, score: Number(sc.impersonation_resilience_score || 0) }
+        ];
+        const activeWeightSum = pillars.reduce((acc, p) => acc + (notEval.has(p.key) ? 0 : p.baseW), 0) || 100;
+        const pillarRows = pillars.map(p => {
+          if (notEval.has(p.key)) {
+            return _kpiRow(`${p.name} (excluded)`, 'N/A (weight renormalized)', 'var(--text-muted)');
+          }
+          const effW = (p.baseW / activeWeightSum) * 100;
+          const contrib = (p.score * (p.baseW / activeWeightSum));
+          const wLabel = Math.abs(effW - p.baseW) > 0.05 ? `${effW.toFixed(1)}% renorm` : `${p.baseW}%`;
+          return _kpiRow(`${p.name} (${wLabel})`, `${p.score.toFixed(1)}% -> +${contrib.toFixed(2)} pts`, scoreTextColor(p.score));
+        }).join('');
+
+        const detBase = Number(sc.deterministic_composite_score ?? sc.overall_posture_score ?? 0);
+        const adkDelta = Number(sc.agentic_calibration_delta || 0);
+        const preCap = Number(sc.pre_cap_score ?? (detBase + adkDelta));
+        const capDelta = Number(sc.critical_cap_delta || 0);
+        const completeness = Number(sc.data_completeness_pct ?? 100);
+        const deltaStr = adkDelta >= 0 ? `+${adkDelta.toFixed(1)}%` : `${adkDelta.toFixed(1)}%`;
+        const capStr = capDelta < 0 ? `${capDelta.toFixed(1)}% (<=84% ceiling)` : '0.0% (not triggered)';
+        const capNote = sc.critical_exposure_cap_applied
+          ? `Critical Exposure Ceiling triggered: ${sc.critical_exposure_cap_applied}.`
+          : 'Tiers: Optimized (>=85%, 100% completeness), Managed (70-84.9%, or max tier when completeness <100%), Developing (50-69.9%), Initial (<50%). The <=84% ceiling triggers only on public bindings or >90d static SA keys without disableServiceAccountKeyCreation when Pre-Cap > 84%.';
+
+        return `<div class="kpi-pop-hdr"><span class="kpi-pop-title">Overall Posture Health</span><span class="kpi-pop-badge" style="color:${scoreTextColor(sc.overall_posture_score)};">${Number(sc.overall_posture_score).toFixed(1)}% • ${escHtml(sc.maturity_tier)}</span></div>
+          <div class="kpi-pop-label">Formula</div>
+          <div class="kpi-pop-formula">Final = 18-Control Weighted Baseline (${detBase.toFixed(1)}%) + ADK Calibration (${deltaStr}) + Cap (${capDelta.toFixed(1)}%)</div>
+          <div class="kpi-pop-label">Live Pillar Contributions (Weighted)</div>
+          <div class="kpi-pop-rows">${pillarRows}</div>
+          <div class="kpi-pop-label">Calibration, Ceiling &amp; Scope</div>
+          <div class="kpi-pop-rows">
+            ${_kpiRow('18-Control Deterministic Baseline', `${detBase.toFixed(1)}%`, '#8AB4F8')}
+            ${_kpiRow('Bounded ADK Calibration ([-5%, +5%])', deltaStr, adkDelta >= 0 ? '#8CE99A' : '#FFD43B')}
+            ${_kpiRow('Pre-Cap Composite Score', `${preCap.toFixed(1)}%`)}
+            ${_kpiRow('Critical Exposure Gate (<=84% cap)', capStr, capDelta < 0 ? '#FFA8A8' : 'var(--text-muted)')}
+            ${_kpiRow('Bindings Analyzed / Completeness', `${Number(sc.total_bindings_analyzed || 0).toLocaleString()} bindings • ${completeness.toFixed(1)}%`, completeness < 100 ? '#FFD43B' : '#8CE99A')}
+          </div>
+          <div class="kpi-pop-note">${escHtml(capNote)}</div>`;
+      }
+
+      if (kpiKey === 'compliant') {
+        if (!tm) {
+          return `<div class="kpi-pop-hdr"><span class="kpi-pop-title">Compliant Principals</span><span class="kpi-pop-badge">Formula</span></div>
+            <div class="kpi-pop-label">Methodology</div>
+            <div class="kpi-pop-formula">(Internal_Compliant + External_Compliant + Workload_Compliant) / Total_Principals_Evaluated</div>
+            <div class="kpi-pop-note">Counts every individual human, group, external identity, and Service Account passing all deterministic baseline hygiene rules across the 3 Identity Triad pillars.</div>`;
+        }
+        const intM = tm.internal_identities || {};
+        const extM = tm.external_identities || {};
+        const wklM = tm.workload_service_accounts || {};
+        const iC = Number(intM.compliant_principals || 0), iT = Number(intM.total_principals_evaluated || 0);
+        const eC = Number(extM.compliant_principals || 0), eT = Number(extM.total_principals_evaluated || 0);
+        const wC = Number(wklM.compliant_principals || 0), wT = Number(wklM.total_principals_evaluated || 0);
+        const cSum = iC + eC + wC;
+        const tSum = iT + eT + wT;
+        const failSum = Math.max(0, tSum - cSum);
+        const passPct = tSum > 0 ? ((cSum / tSum) * 100).toFixed(1) : '0.0';
+
+        return `<div class="kpi-pop-hdr"><span class="kpi-pop-title">Compliant Principals</span><span class="kpi-pop-badge" style="color:#8CE99A;">${cSum}/${tSum} (${passPct}%)</span></div>
+          <div class="kpi-pop-label">Formula</div>
+          <div class="kpi-pop-formula">(${iC} Internal + ${eC} External + ${wC} Workload) / (${iT} + ${eT} + ${wT}) = ${cSum}/${tSum}</div>
+          <div class="kpi-pop-label">Live Pillar Breakdown</div>
+          <div class="kpi-pop-rows">
+            ${_kpiRow('Internal Workforce (Users & Groups)', `${iC}/${iT} passing (${Math.max(0, iT - iC)} failing)`, iC === iT ? '#8CE99A' : '#FFD43B')}
+            ${_kpiRow('External & Partner Identities', `${eC}/${eT} passing (${Math.max(0, eT - eC)} failing)`, eC === eT ? '#8CE99A' : '#FFD43B')}
+            ${_kpiRow('Workload & Service Accounts', `${wC}/${wT} passing (${Math.max(0, wT - wC)} failing)`, wC === wT ? '#8CE99A' : '#FFD43B')}
+            ${_kpiRow('Non-Compliant Principals Total', `${failSum} failing >=1 baseline check`, failSum > 0 ? '#FFA8A8' : '#8CE99A')}
+          </div>
+          <div class="kpi-pop-label">Baseline Pass Criteria</div>
+          <ul class="kpi-pop-list">
+            <li><strong>Internal:</strong> Group-based or JIT-conditioned/single-SA grants; no unconditioned standing Owner/Editor/OrgAdmin/SecurityAdmin; no hierarchy-wide SA impersonation.</li>
+            <li><strong>External:</strong> Not allUsers/allAuthenticatedUsers, not consumer Gmail, and zero primitive/admin/impersonation roles.</li>
+            <li><strong>Workload SAs:</strong> Verified key status (not UNKNOWN), 0 user-managed keys, no active bindings on Default SAs, and zero primitive roles.</li>
+          </ul>
+          <div class="kpi-pop-note">A principal can fail baseline hygiene (e.g. a direct non-group user grant or active Default SA binding) without generating a separate Critical/High finding—so failing principals (${failSum}) can exceed Critical &amp; High Gaps.</div>`;
+      }
+
+      if (kpiKey === 'lpi') {
+        if (!sc) {
+          return `<div class="kpi-pop-hdr"><span class="kpi-pop-title">Least-Privilege Index</span><span class="kpi-pop-badge">Formula</span></div>
+            <div class="kpi-pop-label">Methodology</div>
+            <div class="kpi-pop-formula">LPI = 40% IAM-LPI-01 + 35% IAM-LPI-02 + 25% IAM-LPI-03 (+ ADK Delta[-5,+5])</div>
+            <div class="kpi-pop-note">Measures non-primitive role adoption, permission tightness versus observed Cloud Audit Log activity, and IAM Recommender right-sizing backlog.</div>`;
+        }
+        const ctrls = (sc.control_evaluations || []).filter(c => c.domain === 'LEAST_PRIVILEGE');
+        const ctrlById = {};
+        ctrls.forEach(c => { ctrlById[c.control_id] = c; });
+        const lpiDefs = [
+          { id: 'IAM-LPI-01', label: 'Non-Primitive Role Adoption (40%)', w: 40 },
+          { id: 'IAM-LPI-02', label: 'Grant Tightness vs. Audit Logs (35%)', w: 35 },
+          { id: 'IAM-LPI-03', label: 'Recommender & >=1k-Perm Backlog (25%)', w: 25 }
+        ];
+        let detNum = 0, detW = 0;
+        const ctrlRows = lpiDefs.map(d => {
+          const c = ctrlById[d.id];
+          if (!c) return _kpiRow(`${d.id} — ${d.label}`, 'Pending');
+          if (String(c.status || '').toUpperCase() === 'NOT_EVALUATED') {
+            return _kpiRow(`${d.id} (${d.w}% excluded)`, 'NOT_EVALUATED', 'var(--text-muted)');
+          }
+          const pct = Number(c.deterministic_score_pct || 0);
+          detNum += pct * d.w;
+          detW += d.w;
+          return _kpiRow(`${d.id} — ${d.label}`, `${c.numerator}/${c.denominator} = ${pct.toFixed(1)}%`, scoreTextColor(pct));
+        }).join('');
+        const detLpi = detW > 0 ? (detNum / detW) : Number(sc.least_privilege_index || 0);
+        const finalLpi = Number(sc.least_privilege_index || 0);
+        const lpiDelta = finalLpi - detLpi;
+        const lpiDeltaStr = Math.abs(lpiDelta) >= 0.05 ? `${lpiDelta >= 0 ? '+' : ''}${lpiDelta.toFixed(1)}%` : '0.0%';
+        const excessPerms = Number(sc.excess_permissions_eliminated || 0);
+        const overprivCnt = Number(sc.overprivileged_bindings_count || 0);
+
+        return `<div class="kpi-pop-hdr"><span class="kpi-pop-title">Least-Privilege Index</span><span class="kpi-pop-badge" style="color:${scoreTextColor(finalLpi)};">${finalLpi}%</span></div>
+          <div class="kpi-pop-label">Formula</div>
+          <div class="kpi-pop-formula">LPI = 0.40 * LPI-01 + 0.35 * LPI-02 + 0.25 * LPI-03 (+ bounded ADK delta)</div>
+          <div class="kpi-pop-label">Live Control Breakdown</div>
+          <div class="kpi-pop-rows">
+            ${ctrlRows}
+            ${_kpiRow('Deterministic LPI / ADK Calibration', `${detLpi.toFixed(1)}% (${lpiDeltaStr}) -> ${finalLpi.toFixed(1)}%`, '#8AB4F8')}
+          </div>
+          <div class="kpi-pop-label">Excess Permissions Removable</div>
+          <div class="kpi-pop-rows">
+            ${_kpiRow('Removable Permissions (Sum across Recs)', `${excessPerms.toLocaleString()} perms across ${recs.length} rec(s)`, '#8CE99A')}
+            ${_kpiRow('Overprivileged Bindings Flagged', `${overprivCnt} binding(s)`, overprivCnt > 0 ? '#FFD43B' : '#8CE99A')}
+          </div>
+          <div class="kpi-pop-note">IAM-LPI-02 scores each binding via <code>1 - min(1, max(0, granted - max(exercised, 40)) / 2500)</code> (with a 75% waste discount when an upper-bounded temporal CEL JIT condition exists). Removable permissions equal the sum of <code>granted_perms - proposed_role_perms</code> across right-sizing recommendations.</div>`;
+      }
+
+      // Default: crithigh (Critical & High Gaps)
+      if (!sc || !tm) {
+        return `<div class="kpi-pop-hdr"><span class="kpi-pop-title">Critical &amp; High Gaps</span><span class="kpi-pop-badge">Formula</span></div>
+          <div class="kpi-pop-label">Methodology</div>
+          <div class="kpi-pop-formula">Critical_High_Gaps = Critical_Findings + High_Findings (Telemetry-Grounded)</div>
+          <div class="kpi-pop-note">Counts strictly telemetry-grounded Critical and High findings verified against live CAI bindings and resources before scoring.</div>`;
+      }
+      const crit = Number(sc.critical_findings || 0);
+      const high = Number(sc.high_findings || 0);
+      const med = Number(sc.medium_findings || 0);
+      const low = Number(sc.low_findings || 0);
+      const totalF = crit + high + med + low;
+      const intM = tm.internal_identities || {};
+      const extM = tm.external_identities || {};
+      const wklM = tm.workload_service_accounts || {};
+      const findings = Array.isArray(tm.findings) ? tm.findings : [];
+      const topCritHigh = findings.filter(f => f.severity === 'CRITICAL' || f.severity === 'HIGH').slice(0, 4);
+      const dropped = Number((book.telemetry && book.telemetry.ungrounded_findings_dropped) || 0);
+      const topListHtml = topCritHigh.length > 0
+        ? `<div class="kpi-pop-label">Counted Critical &amp; High Findings</div><ul class="kpi-pop-list">${topCritHigh.map(f => `<li><strong>[${escHtml(f.severity)}]</strong> ${escHtml(f.title || f.finding_id)} <span class="mono" style="color:#8AB4F8;">(${escHtml(String(f.principal || '').split(':').pop())})</span></li>`).join('')}${crit + high > topCritHigh.length ? `<li>+${(crit + high) - topCritHigh.length} additional Critical/High finding(s) in Triad Matrix</li>` : ''}</ul>`
+        : '';
+      const groundNote = dropped > 0
+        ? `Every finding is deterministically verified against live CAI bindings/resources (${dropped} unverified LLM finding(s) were automatically dropped before counting).`
+        : 'Every finding is deterministically verified against live CAI bindings/resources (principal, role, and resource) before counting.';
+
+      return `<div class="kpi-pop-hdr"><span class="kpi-pop-title">Critical &amp; High Gaps</span><span class="kpi-pop-badge" style="color:${(crit + high) > 0 ? '#FFA8A8' : '#8CE99A'};">${crit + high} (${crit}C / ${high}H)</span></div>
+        <div class="kpi-pop-label">Formula</div>
+        <div class="kpi-pop-formula">Critical (${crit}) + High (${high}) = ${crit + high} priority gaps (out of ${totalF} grounded findings)</div>
+        <div class="kpi-pop-label">Severity &amp; Pillar Distribution</div>
+        <div class="kpi-pop-rows">
+          ${_kpiRow('Critical / High', `${crit} Critical • ${high} High`, (crit + high) > 0 ? '#FFA8A8' : '#8CE99A')}
+          ${_kpiRow('Medium / Low', `${med} Medium • ${low} Low`, 'var(--text-muted)')}
+          ${_kpiRow('Internal Workforce Pillar', `${Number(intM.critical_findings_count || 0)}C • ${Number(intM.high_findings_count || 0)}H`)}
+          ${_kpiRow('External & Partner Pillar', `${Number(extM.critical_findings_count || 0)}C • ${Number(extM.high_findings_count || 0)}H`)}
+          ${_kpiRow('Workload & Service Accounts Pillar', `${Number(wklM.critical_findings_count || 0)}C • ${Number(wklM.high_findings_count || 0)}H`)}
+        </div>
+        ${topListHtml}
+        <div class="kpi-pop-note">${escHtml(groundNote)}</div>`;
+    }
+
+    function positionKpiRationalePopover(anchorEl) {
+      const pop = document.getElementById('kpiRationalePopover');
+      if (!pop || !anchorEl) return;
+      const rect = anchorEl.getBoundingClientRect();
+      const pad = 12;
+      const popRect = pop.getBoundingClientRect();
+      const popW = popRect.width || 420;
+      const popH = popRect.height || 260;
+
+      let left = rect.left + (rect.width / 2) - (popW / 2);
+      left = Math.max(pad, Math.min(left, window.innerWidth - popW - pad));
+
+      let top = rect.bottom + 10;
+      if (top + popH > window.innerHeight - pad && rect.top - popH - 10 >= pad) {
+        top = rect.top - popH - 10;
+      } else if (top + popH > window.innerHeight - pad) {
+        top = Math.max(pad, window.innerHeight - popH - pad);
+      }
+
+      pop.style.left = `${Math.round(left)}px`;
+      pop.style.top = `${Math.round(top)}px`;
+    }
+
+    function showKpiRationalePopover(anchorEl) {
+      const pop = document.getElementById('kpiRationalePopover');
+      if (!pop || !anchorEl) return;
+      const key = anchorEl.getAttribute('data-kpi-rationale');
+      if (!key) return;
+      if (_kpiHideTimer) { clearTimeout(_kpiHideTimer); _kpiHideTimer = null; }
+      _activeKpiAnchor = anchorEl;
+      pop.innerHTML = buildKpiRationaleHtml(key, latestBook);
+      pop.setAttribute('aria-hidden', 'false');
+      pop.classList.add('visible');
+      positionKpiRationalePopover(anchorEl);
+    }
+
+    function scheduleHideKpiRationalePopover(delayMs = 140) {
+      if (_kpiHideTimer) clearTimeout(_kpiHideTimer);
+      _kpiHideTimer = setTimeout(() => {
+        const pop = document.getElementById('kpiRationalePopover');
+        if (!pop) return;
+        pop.classList.remove('visible');
+        pop.setAttribute('aria-hidden', 'true');
+        _activeKpiAnchor = null;
+      }, delayMs);
+    }
+
+    function initKpiRationalePopovers() {
+      const pop = document.getElementById('kpiRationalePopover');
+      if (!pop) return;
+      document.querySelectorAll('.stat-card[data-kpi-rationale]').forEach(card => {
+        card.addEventListener('mouseenter', () => showKpiRationalePopover(card));
+        card.addEventListener('mouseleave', () => scheduleHideKpiRationalePopover(140));
+        card.addEventListener('focus', () => showKpiRationalePopover(card));
+        card.addEventListener('blur', () => scheduleHideKpiRationalePopover(100));
+        card.addEventListener('click', () => scheduleHideKpiRationalePopover(0));
+      });
+      pop.addEventListener('mouseenter', () => {
+        if (_kpiHideTimer) { clearTimeout(_kpiHideTimer); _kpiHideTimer = null; }
+      });
+      pop.addEventListener('mouseleave', () => scheduleHideKpiRationalePopover(120));
+      window.addEventListener('keydown', (ev) => {
+        if (ev.key === 'Escape') scheduleHideKpiRationalePopover(0);
+      });
+      window.addEventListener('scroll', () => {
+        if (_activeKpiAnchor) positionKpiRationalePopover(_activeKpiAnchor);
+      }, { passive: true });
+      window.addEventListener('resize', () => {
+        if (_activeKpiAnchor) positionKpiRationalePopover(_activeKpiAnchor);
+      });
     }
 
     async function runAdkChat() {
@@ -5547,6 +5983,7 @@ async def serve_executive_dashboard(request: Request) -> HTMLResponse:
     });
 
     window.addEventListener('DOMContentLoaded', async () => {
+      initKpiRationalePopovers();
       onConnectionModeChange();
       await checkInitialSessionStatus();
     });
